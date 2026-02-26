@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
@@ -7,7 +8,6 @@ use std::env;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
-use colored::Colorize;
 
 mod cache;
 mod graph;
@@ -108,7 +108,7 @@ fn run_build(
     cache.flags = current_flags.clone();
 
     // graph.update_dirty(cache);
-    graph.update_dirty(&cache, &current_compiler, &current_flags);
+    graph.update_dirty(&cache);
 
     let need_link = scheduler::build(&mut graph, cache, root, is_debug)?;
     let exe_name = root
@@ -139,7 +139,6 @@ fn run_executable(exe_path: &Path) -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
-
 
 fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
     println!("starting watch daemon in {}", root.display());
@@ -172,7 +171,9 @@ fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
                 Ok(line) => {
                     let args = shell_words::split(line.trim())
                         .unwrap_or_else(|_| vec![line.trim().to_string()]);
-                    if args.is_empty() { continue; }
+                    if args.is_empty() {
+                        continue;
+                    }
 
                     let mut argv = vec!["repl".to_string()];
                     argv.extend(args);
