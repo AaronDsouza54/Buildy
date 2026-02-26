@@ -7,6 +7,7 @@ use std::env;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
+use colored::Colorize;
 
 mod cache;
 mod graph;
@@ -30,7 +31,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Perform a one-shot build and exit
+    /// Perform a build and exit
     Build {
         #[arg(long)]
         release: bool,
@@ -106,7 +107,8 @@ fn run_build(
     cache.compiler = Some(current_compiler);
     cache.flags = current_flags.clone();
 
-    graph.update_dirty(cache);
+    // graph.update_dirty(cache);
+    graph.update_dirty(&cache, &current_compiler, &current_flags);
 
     let need_link = scheduler::build(&mut graph, cache, root, is_debug)?;
     let exe_name = root
@@ -138,6 +140,7 @@ fn run_executable(exe_path: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+
 fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
     println!("starting watch daemon in {}", root.display());
 
@@ -157,84 +160,71 @@ fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
     let mut cache = BuildCache::load();
     let mut changed = HashSet::new();
 
-    loop {
-        // drain filesystem events
-        while let Ok(path) = rx.try_recv() {
-            changed.insert(path);
-        }
+    let result: Result<(), Box<dyn Error>> = (|| {
+        loop {
+            // drain filesystem events
+            while let Ok(path) = rx.try_recv() {
+                changed.insert(path);
+            }
+            let prompt = "buildy> ".red().bold().to_string();
 
-        let prompt = if changed.is_empty() {
-            "buildy> ".to_string()
-        } else {
-            format!("buildy*({})> ", changed.len())
-        };
+            match rl.readline(&prompt) {
+                Ok(line) => {
+                    let args = shell_words::split(line.trim())
+                        .unwrap_or_else(|_| vec![line.trim().to_string()]);
+                    if args.is_empty() { continue; }
 
-        match rl.readline(&prompt) {
-            Ok(line) => {
-                let args = shell_words::split(line.trim())
-                    .unwrap_or_else(|_| vec![line.trim().to_string()]);
+                    let mut argv = vec!["repl".to_string()];
+                    argv.extend(args);
 
-                if args.is_empty() {
-                    continue;
-                }
+                    let trimmed = line.trim();
 
-                // Prepend dummy binary name (clap expects it)
-                let mut argv = vec!["repl".to_string()];
-                argv.extend(args);
+                    if trimmed == "exit" || trimmed == "close" {
+                        println!("shutting down");
+                        break;
+                    } else if trimmed == "help" {
+                        println!("available commands: build, run, close, help");
+                        println!("flags available are --release")
+                    }
 
-                let trimmed = line.trim();
-
-                if trimmed == "exit" || trimmed == "close" {
-                    println!("shutting down");
-                    cache.save()?;
-                    break;
-                } else if trimmed == "help" {
-                    println!("available commands: build, run, close, help");
-                    println!("flags available are --release")
-                }
-
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                match Cli::try_parse_from(&argv) {
-                    Ok(cli) => match cli.command {
-                        Commands::Build { release } => {
-                            let is_debug = !release;
-                            run_build(&root, &mut cache, is_debug)?;
-                            changed.clear();
-                            cache.save()?;
-                        }
-                        Commands::Run { release } => {
-                            let is_debug = !release;
-                            let exe_path = run_build(&root, &mut cache, is_debug)?;
-                            changed.clear();
-                            cache.save()?;
-                            run_executable(&exe_path)?;
-                        }
-                        Commands::Watch => {
-                            println!("Already in watch mode.");
-                        }
-                    },
-                    Err(e) => {
-                        println!("{}", e);
+                    match Cli::try_parse_from(&argv) {
+                        Ok(cli) => match cli.command {
+                            Commands::Build { release } => {
+                                let is_debug = !release;
+                                run_build(&root, &mut cache, is_debug)?;
+                                changed.clear();
+                            }
+                            Commands::Run { release } => {
+                                let is_debug = !release;
+                                let exe_path = run_build(&root, &mut cache, is_debug)?;
+                                changed.clear();
+                                run_executable(&exe_path)?;
+                            }
+                            Commands::Watch => println!("Already in watch mode."),
+                        },
+                        Err(e) => println!("{}", e),
                     }
                 }
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!("CTRL-C");
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                println!("CTRL-D");
-                break;
-            }
-            Err(err) => {
-                eprintln!("error reading line: {:?}", err);
-                break;
+                Err(ReadlineError::Interrupted) => {
+                    println!("CTRL-C");
+                    break;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!("CTRL-D");
+                    break;
+                }
+                Err(err) => {
+                    eprintln!("error reading line: {:?}", err);
+                    break;
+                }
             }
         }
-    }
+        Ok(())
+    })();
 
-    Ok(())
+    // ✅ save cache no matter how we exited the loop
+    cache.save()?;
+    println!("Cache saved. Goodbye!");
+
+    result
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 
-const CACHE_FILENAME: &str = ".buildy_cache.json";
+const CACHE_FILENAME: &str = "target/.buildy_cache.json";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BuildCache {
@@ -46,7 +46,8 @@ impl BuildCache {
         BuildCache::default()
     }
 
-    pub fn save(&self) -> io::Result<()> {
+    pub fn save(&mut self) -> io::Result<()> {
+        self.saved_at = Utc::now(); // update timestamp
         let s = serde_json::to_string_pretty(self)?;
         let mut f = fs::File::create(CACHE_FILENAME)?;
         f.write_all(s.as_bytes())?;
