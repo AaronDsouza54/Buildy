@@ -10,7 +10,9 @@ pub fn hash_file(path: &Path) -> std::io::Result<String> {
 
     loop {
         let n = file.read(&mut buffer).unwrap();
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buffer[..n]);
     }
 

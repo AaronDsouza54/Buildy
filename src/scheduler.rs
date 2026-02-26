@@ -2,13 +2,18 @@ use crate::cache::BuildCache;
 use crate::graph::BuildGraph;
 use crate::target::FileMeta;
 use num_cpus;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 /// Simple scheduler that walks the topologically sorted order and compiles dirty
 /// nodes in parallel but respects dependency order.
-pub fn build(graph: &mut BuildGraph, cache: &mut BuildCache) -> Result<bool, String> {
+pub fn build(
+    graph: &mut BuildGraph,
+    cache: &mut BuildCache,
+    root: &std::path::Path,
+    is_debug: bool,
+) -> Result<bool, String> {
     let mut need_link = false;
 
     // compute a build order for the dirty subset; if nothing is dirty just return
@@ -53,7 +58,7 @@ pub fn build(graph: &mut BuildGraph, cache: &mut BuildCache) -> Result<bool, Str
                     // somebody already failed, bail out
                     return;
                 }
-                if let Err(e) = compile_file(&meta) {
+                if let Err(e) = compile_file(&meta, root, is_debug) {
                     eprintln!("Error compiling {}: {}", meta.path.display(), e);
                     err_flag.store(true, std::sync::atomic::Ordering::Relaxed);
                     return;
@@ -93,31 +98,35 @@ pub fn build(graph: &mut BuildGraph, cache: &mut BuildCache) -> Result<bool, Str
 /// extension.  The object file will reside next to the source with a .o
 /// extension.  Current simplistic command; flags and include paths should be
 /// provided by the graph/config.
-fn compile_file(meta: &FileMeta) -> Result<(), String> {
-    let src = meta.path.to_string_lossy().to_string();
-    let obj = meta
-        .path
-        .with_extension("o")
-        .to_string_lossy()
-        .to_string();
+fn compile_file(meta: &FileMeta, root: &Path, is_debug: bool) -> Result<(), String> {
+    let profile_dir = if is_debug { "debug" } else { "release" };
+    let target_dir = root.join("target").join(profile_dir);
 
-    let mut cmd = if src.ends_with(".c") {
+    std::fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
+
+    let file_stem = meta.path.file_stem().ok_or("invalid file name")?;
+    let obj_path = target_dir.join(file_stem).with_extension("o");
+
+    let mut cmd = if meta.path.extension().and_then(|s| s.to_str()) == Some("c") {
         Command::new("gcc")
     } else {
         Command::new("g++")
     };
 
     cmd.arg("-c");
-    cmd.arg(&src);
+    cmd.arg(&meta.path);
     cmd.arg("-o");
-    cmd.arg(&obj);
+    cmd.arg(&obj_path);
 
-    // always enable debug symbols for now
-    cmd.arg("-g");
+    if is_debug {
+        cmd.arg("-g");
+    } else {
+        cmd.arg("-O3");
+    }
 
     let status = cmd.status().map_err(|e| e.to_string())?;
     if !status.success() {
-        Err(format!("compiler returned non-zero status"))
+        Err(format!("compiler failed on {}", meta.path.display()))
     } else {
         Ok(())
     }
@@ -126,26 +135,56 @@ fn compile_file(meta: &FileMeta) -> Result<(), String> {
 /// Link all object files produced by the graph into a single executable.
 /// The project name is the filename of the working directory, or provided
 /// explicitly by the caller.
-pub fn link(graph: &BuildGraph, output: &PathBuf) -> Result<(), String> {
-    let mut objs: Vec<String> = Vec::new();
-    for (path, _meta) in &graph.nodes {
+pub fn link(
+    graph: &BuildGraph,
+    root: &Path,
+    is_debug: bool,
+    output: &PathBuf,
+) -> Result<(), String> {
+    let profile_dir = if is_debug { "debug" } else { "release" };
+    let target_dir = root.join("target").join(profile_dir);
+
+    let mut objs: Vec<PathBuf> = Vec::new();
+
+    for (path, _) in &graph.nodes {
         if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
             if ["c", "cpp", "cc", "cxx"].contains(&ext) {
-                let obj = path.with_extension("o");
-                if obj.exists() {
-                    objs.push(obj.to_string_lossy().to_string());
+                let file_stem = path.file_stem().ok_or("invalid source filename")?;
+
+                let obj_path = target_dir.join(file_stem).with_extension("o");
+
+                if obj_path.exists() {
+                    objs.push(obj_path);
                 }
             }
         }
     }
+
     if objs.is_empty() {
-        return Ok(());
+        return Ok(()); // nothing to link
     }
 
-    let mut cmd = Command::new("gcc");
-    for o in &objs {
-        cmd.arg(o);
+    let mut use_cpp = false;
+
+    for (path, _) in &graph.nodes {
+        if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+            if ["cpp", "cc", "cxx"].contains(&ext) {
+                use_cpp = true;
+                break;
+            }
+        }
     }
+
+    let mut cmd = if use_cpp {
+        Command::new("g++")
+    } else {
+        Command::new("gcc")
+    };
+
+    for obj in &objs {
+        cmd.arg(obj);
+    }
+
     cmd.arg("-o");
     cmd.arg(output);
 
@@ -156,4 +195,3 @@ pub fn link(graph: &BuildGraph, output: &PathBuf) -> Result<(), String> {
         Ok(())
     }
 }
-

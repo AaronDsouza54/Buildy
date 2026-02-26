@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use rustyline::error::ReadlineError;
 use std::collections::HashSet;
 use std::env;
 use std::error::Error;
@@ -31,9 +31,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Perform a one-shot build and exit
-    Build,
+    Build {
+        #[arg(long)]
+        release: bool,
+    },
     /// Start the watch daemon with an interactive repl
     Watch,
+
+    Run {
+        /// Build in release mode
+        #[arg(long)]
+        release: bool,
+    },
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -45,10 +54,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     match cli.command {
-        Commands::Build => {
+        Commands::Build { release } => {
             let mut cache = BuildCache::load();
-            run_build(&cwd, &mut cache)?;
+            let is_debug = !release;
+            run_build(&cwd, &mut cache, is_debug)?;
             cache.save()?;
+        }
+        Commands::Run { release } => {
+            let mut cache = BuildCache::load();
+            let is_debug = !release;
+            let exe_path = run_build(&cwd, &mut cache, is_debug)?;
+            println!("executable path: {}", exe_path.display());
+            cache.save()?;
+            run_executable(&exe_path)?;
         }
         Commands::Watch => {
             watch_mode(cwd)?;
@@ -58,22 +76,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_build(root: &Path, cache: &mut BuildCache) -> Result<(), Box<dyn Error>> {
+/// Build the project and return the path to the executable if linking occurred.
+fn run_build(
+    root: &Path,
+    cache: &mut BuildCache,
+    is_debug: bool,
+) -> Result<PathBuf, Box<dyn Error>> {
     println!("scanning sources in {}", root.display());
 
     let mut graph = BuildGraph::new();
     graph.scan(root, &[])?;
     // remove cache entries for files that no longer exist
-    let existing: std::collections::HashSet<String> =
-        graph.nodes.keys().map(|p| p.to_string_lossy().to_string()).collect();
+    let existing: HashSet<String> = graph
+        .nodes
+        .keys()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
     cache.files.retain(|k, _| existing.contains(k));
 
     // if compiler or flags changed since last cache, invalidate all
     let current_compiler = "gcc".to_string();
     let current_flags: Vec<String> = vec!["-g".into()];
-    if cache.compiler.as_ref() != Some(&current_compiler)
-        || cache.flags != current_flags
-    {
+    if cache.compiler.as_ref() != Some(&current_compiler) || cache.flags != current_flags {
         println!("compiler or flags changed, invalidating cache");
         for meta in graph.nodes.values_mut() {
             meta.dirty = true;
@@ -84,21 +108,33 @@ fn run_build(root: &Path, cache: &mut BuildCache) -> Result<(), Box<dyn Error>> 
 
     graph.update_dirty(cache);
 
-    let need_link = scheduler::build(&mut graph, cache)?;
+    let need_link = scheduler::build(&mut graph, cache, root, is_debug)?;
+    let exe_name = root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "a.out".into());
+
+    let profile_dir = if is_debug { "debug" } else { "release" };
+    let output_dir = root.join("target").join(profile_dir);
+    std::fs::create_dir_all(&output_dir)?;
+    let output_path = output_dir.join(&exe_name);
+
     if need_link {
-        let exe_name = root
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "a.out".into());
-        let output = root.join(&exe_name);
-        println!("linking -> {}", output.display());
-        if let Err(e) = scheduler::link(&graph, &output) {
-            eprintln!("link failed: {}", e);
-        }
+        scheduler::link(&graph, root, is_debug, &output_path)?;
     } else {
         println!("nothing to link");
     }
 
+    Ok(output_path)
+}
+
+/// Run an executable from a given path.
+fn run_executable(exe_path: &Path) -> Result<(), Box<dyn Error>> {
+    if exe_path.exists() {
+        std::process::Command::new(exe_path).status()?;
+    } else {
+        println!("executable not found, build first");
+    }
     Ok(())
 }
 
@@ -106,14 +142,15 @@ fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
     println!("starting watch daemon in {}", root.display());
 
     let (tx, rx) = channel();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
-        Ok(event) => {
-            for path in event.paths {
-                let _ = tx.send(path);
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+            Ok(event) => {
+                for path in event.paths {
+                    let _ = tx.send(path);
+                }
             }
-        }
-        Err(e) => eprintln!("watch error: {:?}", e),
-    })?;
+            Err(e) => eprintln!("watch error: {:?}", e),
+        })?;
     watcher.watch(&root, RecursiveMode::Recursive)?;
 
     let mut rl: Editor<(), _> = Editor::new()?;
@@ -134,39 +171,53 @@ fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
 
         match rl.readline(&prompt) {
             Ok(line) => {
-                let cmd = line.trim();
-                let _ = rl.add_history_entry(cmd);
-                match cmd {
-                    "build" => {
-                        run_build(&root, &mut cache)?;
-                        changed.clear();
-                        cache.save()?;
-                    }
-                    "run" => {
-                        let exe = root
-                            .file_name()
-                            .map(|s| s.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "a.out".into());
-                        let path = root.join(&exe);
-                        if path.exists() {
-                            println!("running {}", path.display());
-                            let _ = std::process::Command::new(path).status();
-                        } else {
-                            println!("executable not found, build first");
+                let args = shell_words::split(line.trim())
+                    .unwrap_or_else(|_| vec![line.trim().to_string()]);
+
+                if args.is_empty() {
+                    continue;
+                }
+
+                // Prepend dummy binary name (clap expects it)
+                let mut argv = vec!["repl".to_string()];
+                argv.extend(args);
+
+                let trimmed = line.trim();
+
+                if trimmed == "exit" || trimmed == "close" {
+                    println!("shutting down");
+                    cache.save()?;
+                    break;
+                } else if trimmed == "help" {
+                    println!("available commands: build, run, close, help");
+                    println!("flags available are --release")
+                }
+
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                match Cli::try_parse_from(&argv) {
+                    Ok(cli) => match cli.command {
+                        Commands::Build { release } => {
+                            let is_debug = !release;
+                            run_build(&root, &mut cache, is_debug)?;
+                            changed.clear();
+                            cache.save()?;
                         }
-                    }
-                    "close" | "exit" => {
-                        println!("shutting down");
-                        cache.save()?;
-                        break;
-                    }
-                    "help" => {
-                        println!("available commands: build, run, close, help");
-                    }
-                    other => {
-                        if !other.is_empty() {
-                            println!("unknown command: {}", other);
+                        Commands::Run { release } => {
+                            let is_debug = !release;
+                            let exe_path = run_build(&root, &mut cache, is_debug)?;
+                            changed.clear();
+                            cache.save()?;
+                            run_executable(&exe_path)?;
                         }
+                        Commands::Watch => {
+                            println!("Already in watch mode.");
+                        }
+                    },
+                    Err(e) => {
+                        println!("{}", e);
                     }
                 }
             }

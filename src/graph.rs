@@ -44,15 +44,13 @@ impl BuildGraph {
                         node.deps = deps.clone();
                     }
                     for d in deps {
-                        self.nodes.entry(d.clone()).or_insert_with(|| {
-                            FileMeta {
-                                path: d.clone(),
-                                hash: String::new(),
-                                last_modified: chrono::Utc::now(),
-                                deps: Vec::new(),
-                                dependents: Vec::new(),
-                                dirty: true,
-                            }
+                        self.nodes.entry(d.clone()).or_insert_with(|| FileMeta {
+                            path: d.clone(),
+                            hash: String::new(),
+                            last_modified: chrono::Utc::now(),
+                            deps: Vec::new(),
+                            dependents: Vec::new(),
+                            dirty: true,
                         });
                         if let Some(depnode) = self.nodes.get_mut(&d) {
                             depnode.dependents.push(path.clone());
@@ -64,7 +62,6 @@ impl BuildGraph {
 
         Ok(())
     }
-
 
     fn parse_deps(&self, file: &Path, extra_flags: &[String]) -> io::Result<Vec<PathBuf>> {
         let compiler = if file
@@ -123,8 +120,7 @@ impl BuildGraph {
             if !seen.insert(p.clone()) {
                 continue;
             }
-            // copy dependents list to avoid borrowing conflict when later
-            // mutably accessing nodes
+            // copy dependents list to avoid borrowing conflict when mutably accessing nodes later
             let dependents = if let Some(node) = self.nodes.get(&p) {
                 node.dependents.clone()
             } else {
@@ -142,7 +138,7 @@ impl BuildGraph {
     }
 
     pub fn topo_sort_dirty(&self) -> Vec<PathBuf> {
-        // determine set of files we care about (dirty or dependent on dirty)
+        // determining the set of files we actually care about (dirty or dependent on dirty)
         let mut dirty_set: HashSet<PathBuf> = self
             .nodes
             .iter()
