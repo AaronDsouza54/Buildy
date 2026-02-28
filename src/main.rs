@@ -56,13 +56,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::Build { release } => {
-            let mut cache = BuildCache::load();
+            let mut cache = BuildCache::load(&cwd);
             let is_debug = !release;
             run_build(&cwd, &mut cache, is_debug)?;
             cache.save()?;
         }
         Commands::Run { release } => {
-            let mut cache = BuildCache::load();
+            let mut cache = BuildCache::load(&cwd);
             let is_debug = !release;
             let exe_path = run_build(&cwd, &mut cache, is_debug)?;
             println!("executable path: {}", exe_path.display());
@@ -88,12 +88,18 @@ fn run_build(
     let mut graph = BuildGraph::new();
     graph.scan(root, &[])?;
     // remove cache entries for files that no longer exist
-    let existing: HashSet<String> = graph
+    // existing files are tracked in the graph with absolute paths. The
+    // cache stores its keys relative to `root`, so when we are filtering we can
+    // convert each stored key back to an absolute path for comparison.
+    let existing: HashSet<std::path::PathBuf> = graph
         .nodes
         .keys()
-        .map(|p| p.to_string_lossy().to_string())
+        .cloned()
         .collect();
-    cache.files.retain(|k, _| existing.contains(k));
+    cache.files.retain(|k, _| {
+        let abs = BuildCache::make_absolute(k, root);
+        existing.contains(&abs)
+    });
 
     // if compiler or flags changed since last cache, invalidate all
     let current_compiler = "gcc".to_string();
@@ -107,8 +113,8 @@ fn run_build(
     cache.compiler = Some(current_compiler);
     cache.flags = current_flags.clone();
 
-    // graph.update_dirty(cache);
-    graph.update_dirty(&cache);
+    // update_dirty now needs the project root to convert paths as well
+    graph.update_dirty(&cache, root);
 
     let need_link = scheduler::build(&mut graph, cache, root, is_debug)?;
     let exe_name = root
@@ -156,7 +162,7 @@ fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
     watcher.watch(&root, RecursiveMode::Recursive)?;
 
     let mut rl: Editor<(), _> = Editor::new()?;
-    let mut cache = BuildCache::load();
+    let mut cache = BuildCache::load(&root);
     let mut changed = HashSet::new();
 
     let result: Result<(), Box<dyn Error>> = (|| {
@@ -223,7 +229,6 @@ fn watch_mode(root: PathBuf) -> Result<(), Box<dyn Error>> {
         Ok(())
     })();
 
-    // ✅ save cache no matter how we exited the loop
     cache.save()?;
     println!("Cache saved. Goodbye!");
 

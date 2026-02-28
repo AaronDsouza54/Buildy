@@ -1,5 +1,7 @@
 # Buildy
 
+![Buildy Mascot](documentation/assets/buildy_mascot.png)
+
 Buildy is a simple Rust-based build tool for C/C++ projects. It tracks
 file dependencies (via `gcc -MM`), computes hashes, and performs incremental
 compilation with a daemon mode and a REPL interface.

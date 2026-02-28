@@ -40,20 +40,16 @@ impl FileMeta {
         })
     }
 
-    /// Update the stored last_modified and recompute hash using the given
-    /// hashing callback.
     pub fn refresh<T>(&mut self, hash_fn: T) -> io::Result<()>
     where
         T: Fn(&Path) -> io::Result<String>,
     {
         let metadata = fs::metadata(&self.path)?;
         let modified = metadata.modified()?;
-        let lm: DateTime<Utc> = modified.into();
-        if lm != self.last_modified {
-            self.last_modified = lm;
-            self.hash = hash_fn(&self.path)?;
-            self.dirty = true;
-        }
+        self.last_modified = modified.into();
+
+        self.hash = hash_fn(&self.path)?; // always computes hash to ensure it reflects current content
+
         Ok(())
     }
 }

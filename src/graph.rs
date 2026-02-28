@@ -102,10 +102,10 @@ impl BuildGraph {
         Ok(deps)
     }
 
-    pub fn update_dirty(&mut self, cache: &BuildCache) {
+    pub fn update_dirty(&mut self, cache: &BuildCache, root: &std::path::Path) {
         for meta in self.nodes.values_mut() {
             let _ = meta.refresh(|p| hash_file(p));
-            if !cache.file_matches(meta) {
+            if !cache.file_matches(meta, root) {
                 meta.dirty = true;
             }
         }

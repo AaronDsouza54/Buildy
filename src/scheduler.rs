@@ -35,7 +35,7 @@ pub fn build(
     if work.is_empty() {
         // nothing to compile
         for meta in graph.nodes.values() {
-            cache.update_file(meta);
+            cache.update_file(meta, root);
         }
         return Ok(false);
     }
@@ -82,13 +82,13 @@ pub fn build(
     for p in built_obj_files.iter() {
         if let Some(m) = graph.nodes.get_mut(p) {
             m.dirty = false;
-            cache.update_file(m);
+            cache.update_file(m, root);
         }
     }
 
     // also update cache for others (for example, header timestamps)
     for meta in graph.nodes.values() {
-        cache.update_file(meta);
+        cache.update_file(meta, root);
     }
 
     Ok(need_link)
